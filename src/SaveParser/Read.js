@@ -1,51 +1,116 @@
 /* global Sentry, Intl, self */
+
+/**
+ * @typedef {import("./types").GameSave} GameSave
+ * @typedef {import("./types").DefaultValues} DefaultValues
+ * @typedef {import("./types").ParsedByte} ParsedByte
+ * @typedef {import("./types").ParsedDouble} ParsedDouble
+ * @typedef {import("./types").ParsedFloat} ParsedFloat
+ * @typedef {import("./types").ParsedHex} ParsedHex
+ * @typedef {import("./types").ParsedInt} ParsedInt
+ * @typedef {import("./types").ParsedInt8} ParsedInt8
+ * @typedef {import("./types").ParsedLong} ParsedLong
+ * @typedef {import("./types").ParsedString} ParsedString
+ * @typedef {import("./types").ParsedFINGPUT1BufferPixel} ParsedFINGPUT1BufferPixel
+ * @typedef {import("./types").Reporter} Reporter
+ */
+
 import pako                                     from '../Lib/pako.esm.mjs';
 
 import { defaultValues }                        from '../SaveParser.js'
 
-export default class SaveParser_Read
+/**
+ * Parse the given save file.
+ *
+ * @param {Reporter} reporter
+ * @param {{ arrayBuffer: ArrayBuffer; language: string; }} options
+ * @returns {GameSave}
+ */
+export function parse(reporter, options) {
+    const parser = new SaveParser_Read(reporter, options);
+    if (parser.successful) {
+        return parser.saveResult;
+    }
+    return undefined;
+}
+
+class SaveParser_Read
 {
-    constructor(worker, options)
+    /**
+     * @param {Reporter} reporter
+     * @param {{ arrayBuffer: ArrayBuffer; language: string; }} options
+     */
+    constructor(reporter, options)
     {
-        this.worker             = worker;
-        this.saveResult         = {};
-        this.saveResult.objects = {};
+        /** @type {Reporter} */
+        this.reporter = reporter;
 
-        this.language           = options.language;
+        /** @type {GameSave} */
+        this.saveResult = {
+            objects: {}
+        };
 
-        this.arrayBuffer        = options.arrayBuffer;
-        this.bufferView         = new DataView(this.arrayBuffer); // Still used for header...
-        this.currentByte        = 0;
+        /** @type {string} */
+        this.language = options.language;
+
+        /** @type {ArrayBuffer} */
+        this.arrayBuffer = options.arrayBuffer;
+
+        /** @type {DataView} */
+        this.bufferView = new DataView(this.arrayBuffer); // Still used for header...
+
+        /** @type {number} */
+        this.currentByte = 0;
+
+        /** @type {boolean} */
+        this.successful = false;
+
+        /** @type {number} */
+        this._totalProgressWeight = 0.45;
+
+        /** @type {number} */
+        this._previousStepsTotalProgress = 0;
+
+        /** @type {number} */
+        this._progressStep = 0;
+
+        /** @type {number[]} */
+        this._loadingProgressWeights = [
+            0.550,   // Inflating Chunks
+            0.024,   // Merging Chunks - part 1
+            0.025,   // Merging Chunks - part 2
+            0.200,   // Parsing Objects
+            0.200,   // Parsing Entities
+            0.001,   // Parsing Collectables
+        ];
 
         this.parseHeader();
     }
 
     parseHeader()
     {
-        this.header                      = {};
-        this.header.saveHeaderType       = this.readInt();
-        this.header.saveVersion          = this.readInt();
-        this.header.buildVersion         = this.readInt();
-        this.header.mapName              = this.readString();
-        this.header.mapOptions           = this.readString();
-        this.header.sessionName          = this.readString();
-        this.header.playDurationSeconds  = this.readInt();
-        this.header.saveDateTime         = this.readLong();
-        this.header.sessionVisibility    = this.readByte();
+        this.saveResult.header                      = {};
+        this.saveResult.header.saveHeaderType       = this.readInt();
+        this.saveResult.header.saveVersion          = this.readInt();
+        this.saveResult.header.buildVersion         = this.readInt();
+        this.saveResult.header.mapName              = this.readString();
+        this.saveResult.header.mapOptions           = this.readString();
+        this.saveResult.header.sessionName          = this.readString();
+        this.saveResult.header.playDurationSeconds  = this.readInt();
+        this.saveResult.header.saveDateTime         = this.readLong();
+        this.saveResult.header.sessionVisibility    = this.readByte();
 
-        if(this.header.saveHeaderType >= 7)
+        if(this.saveResult.header.saveHeaderType >= 7)
         {
-            this.header.fEditorObjectVersion = this.readInt();
+            this.saveResult.header.fEditorObjectVersion = this.readInt();
         }
-        if(this.header.saveHeaderType >= 8)
+        if(this.saveResult.header.saveHeaderType >= 8)
         {
-            this.header.modMetadata      = this.readString();
-            this.header.isModdedSave     = this.readInt();
+            this.saveResult.header.modMetadata      = this.readString();
+            this.saveResult.header.isModdedSave     = this.readInt();
         }
 
-        console.log(this.header);
-
-        this.worker.postMessage({command: 'saveResult', result: {header: this.header}});
+        console.log(this.saveResult.header);
 
         this.parseObjects();
     }
@@ -53,13 +118,15 @@ export default class SaveParser_Read
     parseObjects()
     {
         // We should now unzip the body!
-        if(this.header.saveVersion >= 21)
+        if(this.saveResult.header.saveVersion >= 21)
         {
             this.parseCompressedObjectsV21();
         }
         else
         {
-            this.worker.postMessage({command: 'alert', message: 'That save version isn\'t supported anymore... Please save it again in the game.'});
+            this.reporter.reportFailure({
+                message: 'That save version isn\'t supported anymore... Please save it again in the game.'
+            });
         }
     }
 
@@ -118,7 +185,9 @@ export default class SaveParser_Read
             }
             catch(err)
             {
-                this.worker.postMessage({command: 'alert', message: 'Something went wrong while trying to inflate your savegame. It seems to be related to adblock and we are looking into it.'});
+                this.reporter.reportFailure({
+                    message: 'Something went wrong while trying to inflate your savegame. It seems to be related to adblock and we are looking into it.'
+                });
                 if(typeof Sentry !== 'undefined')
                 {
                     Sentry.setContext('pako', pako);
@@ -129,28 +198,48 @@ export default class SaveParser_Read
                 return;
             }
 
-            let currentPercentage = Math.round(this.handledByte / this.maxByte * 100);
-                this.worker.postMessage({command: 'loaderMessage', message: 'Inflating save game (' + currentPercentage + '%)...'});
-                this.worker.postMessage({command: 'loaderProgress', percentage: (currentPercentage * 0.4)});
+            let stepProgress = this.handledByte / this.maxByte;
+            const totalProgress = this.getTotalLoadingProgress(stepProgress);
+            this.reporter.reportProgress({
+                message: 'Inflating save game (' + (100 * stepProgress).toFixed(0) + '%)...',
+                progress: totalProgress,
+            });
         }
 
+        this.gotoNextProgressStep();
         console.log('Inflated: ' + this.currentChunks.length + ' chunks...');
-        this.worker.postMessage({command: 'loaderMessage', message: 'Merging inflated chunks...'});
+        this.reporter.reportProgress({
+            message: 'Merging inflated chunks...',
+        });
 
         // Create the complete Uint8Array
         let newChunkLength = 0;
             for(let i = 0; i < this.currentChunks.length; i++)
             {
+                if (i % 100 === 0) {
+                    this.reporter.reportProgress({
+                        progress: this.getTotalLoadingProgress(i / this.currentChunks.length)
+                    });
+                }
+
                 newChunkLength += this.currentChunks[i].length;
             }
+            this.gotoNextProgressStep();
 
         let tempChunk       = new Uint8Array(newChunkLength);
         let currentLength   = 0;
             for(let i = 0; i < this.currentChunks.length; i++)
             {
+                if (i % 100 === 0) {
+                    this.reporter.reportProgress({
+                        progress: this.getTotalLoadingProgress(i / this.currentChunks.length)
+                    });
+                }
+
                 tempChunk.set(this.currentChunks[i], currentLength);
                 currentLength += this.currentChunks[i].length;
             }
+            this.gotoNextProgressStep();
 
         // Parse them as usual while skipping the firt 4 bytes!
         this.currentByte        = 4;
@@ -166,10 +255,19 @@ export default class SaveParser_Read
         let countObjects                = this.readInt();
         let entitiesToObjects           = [];
             console.log('Parsing: ' + countObjects + ' objects...');
-            this.worker.postMessage({command: 'loaderMessage', message: 'MAP\\SAVEPARSER\\Parsing %1$s objects...', replace: new Intl.NumberFormat(this.language).format(countObjects)});
+            this.reporter.reportProgress({
+                message: 'MAP\\SAVEPARSER\\Parsing %1$s objects...',
+                messageReplace: new Intl.NumberFormat(this.language).format(countObjects)
+            });
 
             for(let i = 0; i < countObjects; i++)
             {
+                if (i % 100 === 0) {
+                    this.reporter.reportProgress({
+                        progress: this.getTotalLoadingProgress(i / countObjects)
+                    });
+                }
+
                 let objectType = this.readInt();
                     switch(objectType)
                     {
@@ -193,31 +291,51 @@ export default class SaveParser_Read
                             break;
                     }
             }
+            this.gotoNextProgressStep();
 
             let countEntities   = this.readInt();
                 console.log('Parsing: ' + countEntities + ' entities...');
-                this.worker.postMessage({command: 'loaderMessage', message: 'MAP\\SAVEPARSER\\Parsing %1$s entities...', replace: new Intl.NumberFormat(this.language).format(countEntities)});
+                this.reporter.reportProgress({
+                    message: 'MAP\\SAVEPARSER\\Parsing %1$s entities...',
+                    messageReplace: new Intl.NumberFormat(this.language).format(countEntities)
+                });
 
             for(let i = 0; i < countEntities; i++)
             {
+                if (i % 100 === 0) {
+                    this.reporter.reportProgress({
+                        progress: this.getTotalLoadingProgress(i / countObjects)
+                    });
+                }
+
                 this.readEntityV5(entitiesToObjects[i]);
             }
+            this.gotoNextProgressStep();
 
             this.saveResult.collectables   = [];
                 let countCollected  = this.readInt();
                     console.log('Parsing: ' + countCollected + ' collectables...');
-                    this.worker.postMessage({command: 'loaderMessage', message: 'MAP\\SAVEPARSER\\Parsing %1$s collectables...', replace: new Intl.NumberFormat(this.language).format(countCollected)});
+                    this.reporter.reportProgress({
+                        message: 'MAP\\SAVEPARSER\\Parsing %1$s collectables...',
+                        messageReplace: new Intl.NumberFormat(this.language).format(countCollected)
+                    });
 
             for(let i = 0; i < countCollected; i++)
             {
+                if (i % 100 === 0) {
+                    this.reporter.reportProgress({
+                        progress: this.getTotalLoadingProgress(i / countCollected)
+                    });
+                }
+
                 this.saveResult.collectables.push(this.readObjectProperty({}));
             }
+            this.gotoNextProgressStep();
 
             delete this.arrayBuffer;
             delete this.bufferView;
 
-            this.worker.postMessage({command: 'saveResult', result: this.saveResult});
-            this.worker.postMessage({command: 'endSaveLoading'});
+            this.successful = true;
     }
 
     // V5 Functions
@@ -446,7 +564,7 @@ export default class SaveParser_Read
                                     case 3: // Offline
                                         break;
                                     default:
-                                        this.worker.postMessage({command: 'alertParsing'});
+                                        this.reporter.reportFailure();
                                         if(typeof Sentry !== 'undefined')
                                         {
                                             Sentry.setContext('BP_PlayerState_C', this.saveResult.objects[objectKey]);
@@ -826,7 +944,7 @@ export default class SaveParser_Read
                                     }
                                     catch(error)
                                     {
-                                        this.worker.postMessage({command: 'alertParsing'});
+                                        this.reporter.reportFailure();
                                         if(typeof Sentry !== 'undefined')
                                         {
                                             Sentry.setContext('currentProperty', currentProperty);
@@ -839,7 +957,7 @@ export default class SaveParser_Read
                         break;
 
                     default:
-                        this.worker.postMessage({command: 'alertParsing'});
+                        this.reporter.reportFailure();
                         if(typeof Sentry !== 'undefined')
                         {
                             Sentry.setContext('currentProperty', currentProperty);
@@ -906,7 +1024,7 @@ export default class SaveParser_Read
                                     }
                                     break;
                                 default:
-                                    this.worker.postMessage({command: 'alertParsing'});
+                                    this.reporter.reportFailure();
                                     if(typeof Sentry !== 'undefined')
                                     {
                                         Sentry.setContext('currentProperty', currentProperty);
@@ -951,7 +1069,7 @@ export default class SaveParser_Read
                                     }
                                     break;
                                 default:
-                                    this.worker.postMessage({command: 'alertParsing'});
+                                    this.reporter.reportFailure();
                                     if(typeof Sentry !== 'undefined')
                                     {
                                         Sentry.setContext('currentProperty', currentProperty);
@@ -1115,7 +1233,7 @@ export default class SaveParser_Read
                         }
                         catch(error)
                         {
-                            this.worker.postMessage({command: 'alertParsing'});
+                            this.reporter.reportFailure();
                             if(typeof Sentry !== 'undefined')
                             {
                                 Sentry.setContext('currentProperty', currentProperty);
@@ -1151,7 +1269,7 @@ export default class SaveParser_Read
                             let rewind = this.lastStrRead + 128;
                                 this.currentByte -= rewind;
                             console.log(this.lastStrRead, this.readHex(rewind), this.readInt(), this.readInt(), this.readInt(), this.readInt());
-                            this.worker.postMessage({command: 'alertParsing'});
+                            this.reporter.reportFailure();
                             if(typeof Sentry !== 'undefined')
                             {
                                 Sentry.setContext('currentProperty', currentProperty);
@@ -1166,7 +1284,7 @@ export default class SaveParser_Read
                 let rewind = this.lastStrRead + 128;
                     this.currentByte -= rewind;
                 console.log(this.lastStrRead, this.readHex(rewind), this.readInt(), this.readInt(), this.readInt(), this.readInt());
-                this.worker.postMessage({command: 'alertParsing'});
+                this.reporter.reportFailure();
                 if(typeof Sentry !== 'undefined')
                 {
                     Sentry.setContext('currentProperty', currentProperty);
@@ -1235,7 +1353,7 @@ export default class SaveParser_Read
                                 currentArgumentsData.argumentValue    = this.readTextProperty({});
                                 break;
                             default:
-                                this.worker.postMessage({command: 'alertParsing'});
+                                this.reporter.reportFailure();
                                 if(typeof Sentry !== 'undefined')
                                 {
                                     Sentry.setContext('currentProperty', currentProperty);
@@ -1256,7 +1374,7 @@ export default class SaveParser_Read
             // HISTORYTYPE_NONE
             case 255:
                 // See: https://github.com/EpicGames/UnrealEngine/blob/4.25/Engine/Source/Runtime/Core/Private/Internationalization/Text.cpp#L894
-                if(this.header.buildVersion >= 140822)
+                if(this.saveResult.header.buildVersion >= 140822)
                 {
                     currentProperty.hasCultureInvariantString   = this.readInt();
 
@@ -1267,7 +1385,7 @@ export default class SaveParser_Read
                 }
                 break;
             default:
-                this.worker.postMessage({command: 'alertParsing'});
+                this.reporter.reportFailure();
                 if(typeof Sentry !== 'undefined')
                 {
                     Sentry.setContext('currentProperty', currentProperty);
@@ -1290,8 +1408,20 @@ export default class SaveParser_Read
     }
 
 
+    getTotalLoadingProgress(stepProgress) {
+        return (
+            this._totalProgressWeight *
+            (
+                this._previousStepsTotalProgress +
+                stepProgress * this._loadingProgressWeights[this._progressStep]
+            )
+        );
+    }
 
-
+    gotoNextProgressStep() {
+        this._previousStepsTotalProgress += this._loadingProgressWeights[this._progressStep];
+        this._progressStep++;
+    }
 
     /*
      * BYTES MANIPULATIONS
@@ -1300,10 +1430,14 @@ export default class SaveParser_Read
     {
         this.currentByte += byteLength;
     }
+
+    /** @returns {ParsedByte} */
     readByte()
     {
         return parseInt(this.bufferView.getUint8(this.currentByte++, true));
     }
+
+    /** @returns {ParsedHex} */
     readHex(hexLength)
     {
         let hexPart = [];
@@ -1318,17 +1452,22 @@ export default class SaveParser_Read
         return hexPart.join('');
     }
 
+    /** @returns {ParsedInt8} */
     readInt8()
     {
         let data = this.bufferView.getInt8(this.currentByte++, true);
             return data;
     }
+
+    /** @returns {ParsedInt} */
     readInt()
     {
         let data = this.bufferView.getInt32(this.currentByte, true);
             this.currentByte += 4;
             return data;
     }
+
+    /** @returns {ParsedLong} */
     readLong()
     {
         let data1   = this.readInt();
@@ -1344,12 +1483,15 @@ export default class SaveParser_Read
             }
     }
 
+    /** @returns {ParsedFloat} */
     readFloat()
     {
         let data = this.bufferView.getFloat32(this.currentByte, true);
             this.currentByte += 4;
             return data;
     }
+
+    /** @returns {ParsedDouble} */
     readDouble()
     {
         let data = this.bufferView.getFloat64(this.currentByte, true);
@@ -1357,6 +1499,7 @@ export default class SaveParser_Read
             return data;
     }
 
+    /** @returns {ParsedString} */
     readString()
     {
         let strLength       = this.readInt();
@@ -1375,7 +1518,7 @@ export default class SaveParser_Read
             this.currentByte    = Math.max(0, startBytes - (debugSize * 2));
             let errorMessage    = 'Cannot readString (' + strLength + '): `' + this.readHex(debugSize * 2) + '`=========`' + this.readHex(debugSize) + '`';
                 console.log(errorMessage);
-                this.worker.postMessage({command: 'alertParsing'});
+                this.reporter.reportFailure();
                 throw new Error(errorMessage);
         }
 
@@ -1420,13 +1563,14 @@ export default class SaveParser_Read
             this.currentByte    = Math.max(0, startBytes - (debugSize * 2));
             let errorMessage    = 'Cannot readString (' + strLength + '):' + error + ': `' + this.readHex(debugSize * 2) + '`=========`' + this.readHex(debugSize) + '`';
                 console.log(errorMessage);
-                this.worker.postMessage({command: 'alertParsing'});
+                this.reporter.reportFailure();
                 throw new Error(errorMessage);
         }
 
         return;
     }
 
+    /** @returns {ParsedFINGPUT1BufferPixel} */
     readFINGPUT1BufferPixel()
     {
         return {
@@ -1545,7 +1689,7 @@ export default class SaveParser_Read
                             structure.unk3      = this.readHex(45); //TODO: Not sure at all!
                             break;
                         default:
-                            this.worker.postMessage({command: 'alertParsing'});
+                            this.reporter.reportFailure();
                             if(typeof Sentry !== 'undefined')
                             {
                                 Sentry.setContext('currentData', data);
@@ -1559,8 +1703,4 @@ export default class SaveParser_Read
 
         return data;
     }
-};
-
-self.onmessage = function(e){
-    return new SaveParser_Read(self, e.data);
 };
