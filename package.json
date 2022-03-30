@@ -15,9 +15,12 @@
         "@sentry/webpack-plugin": "^1.18.8",
         "@types/jquery": "^3.5.14",
         "babel-loader": "^8.2.4",
+        "babel-plugin-transform-object-hasown": "^1.1.0",
+        "callbag": "^1.5.0",
         "json-minimizer-webpack-plugin": "^3.3.0",
         "merge-json-webpack-plugin": "^6.1.0",
         "terser-webpack-plugin": "^5.3.1",
+        "type-fest": "^2.12.1",
         "webpack": "^5.70.0",
         "webpack-cli": "^4.9.2"
     }

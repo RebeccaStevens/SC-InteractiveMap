@@ -20,6 +20,7 @@ module.exports = env => {
         context         : path.resolve(__dirname, 'src'),
         entry           : {
             SCIM                        : './SCIM.js',
+            'Worker/Core'               : './CoreWorker/Worker.js',
             'Worker/SaveParser/Read'    : './SaveParser/ReadWorker.js',
             'Worker/SaveParser/Write'   : './SaveParser/Write.js'
         },

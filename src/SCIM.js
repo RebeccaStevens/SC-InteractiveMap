@@ -1,7 +1,11 @@
+import * as config                              from "./Config/index.js"
+
+import * as coreWorker                          from "./CoreWorker/WorkerManager.js";
+
 import BaseLayout                               from './BaseLayout.js';
 import GameMap                                  from './GameMap.js';
 import SaveParser                               from './SaveParser.js';
-import { setupTranslate }                       from './Translate.js';
+import { setupTranslate, translate }            from './Translate.js';
 
 import BaseLayout_Modal                         from './BaseLayout/Modal.js';
 import Lib_LeafletPlugins                       from './Lib/LeafletPlugins.js';
@@ -10,22 +14,7 @@ export default class SCIM
 {
     constructor()
     {
-        this.build                      = 'EarlyAccess';
-        this.debug                      = false;
-        this.language                   = 'en';
-
         this.outlineClass               = 'btn-outline-warning focus';
-
-        this.staticAssetsUrl            = "https://static.satisfactory-calculator.com";
-        this.mapDataUrl                 = "https://satisfactory-calculator.com/" + this.language + "/interactive-map/index/json";
-        this.gameDataUrl                = "https://satisfactory-calculator.com/" + this.language + "/api/game";
-        this.modsDataUrl                = "https://satisfactory-calculator.com/" + this.language + "/mods/index/json";
-        this.translationDataUrl         = "https://satisfactory-calculator.com/" + this.language + "/api/map/translation";
-        this.tetrominoUrl               = "https://satisfactory-calculator.com/" + this.language + "/api/tetromino";
-        this.usersUrl                   = "https://satisfactory-calculator.com/" + this.language + "/api/users";
-
-        this.saveParserReadWorker       = '/js/InteractiveMap/build/Worker/SaveParser/ReadWorker.js';
-        this.saveParserWriteWorker      = '/js/InteractiveMap/build/Worker/SaveParser/Write.js';
 
         this.collectedOpacity           = 0.3;
 
@@ -47,18 +36,18 @@ export default class SCIM
         }
 
         setupTranslate({
-            dataUrl: this.translationDataUrl,
+            dataUrl: config.getTranslationDataUrl(),
             callback: () => {
                 this.map = new GameMap({
-                    build               : this.build,
+                    build               : config.getBuild(),
                     version             : this.scriptsVERSION,
 
                     collectedOpacity    : this.collectedOpacity,
 
-                    staticUrl           : this.staticAssetsUrl,
-                    dataUrl             : this.mapDataUrl,
+                    staticUrl           : config.getStaticAssetsUri(),
+                    dataUrl             : config.getMapDataUrl(),
 
-                    language            : this.language,
+                    language            : config.getLanguage(),
                     remoteUrl           : remoteUrl
                 });
 
@@ -85,31 +74,57 @@ export default class SCIM
 
     processSaveGameFile(droppedFile)
     {
-        if(droppedFile !== undefined)
-        {
-            if(droppedFile.name.toLowerCase().endsWith('.sav'))
-            {
-                this.showLoader();
-
-                let reader = new FileReader();
-                    reader.readAsArrayBuffer(droppedFile);
-                    reader.onload = function(){
-                        this.drawNewBaseLayout({
-                            droppedFileResult       : reader.result,
-                            droppedFileName         : droppedFile.name
-                        });
-                        delete reader.result;
-                    }.bind(this);
-            }
-            else
-            {
-                alert('File should be name XXX.sav');
-            }
-        }
-        else
-        {
+        if (droppedFile === undefined) {
             alert('Something went wrong reading your save file!');
+            return
         }
+        if(!droppedFile.name.toLowerCase().endsWith('.sav')){
+            alert('File should be name XXX.sav');
+            return
+        }
+
+        this.showLoader();
+
+        let reader = new FileReader();
+        reader.readAsArrayBuffer(droppedFile);
+        reader.addEventListener(
+            "load",
+            () => {
+                const task = coreWorker.createTask(
+                    {
+                        command: "load-save-file",
+                        fileName: droppedFile.name,
+                        rawData: reader.result,
+                    },
+                    {
+                        transfer: [reader.result],
+                    }
+                );
+                coreWorker.startTask(task, (signal, data) => {
+                    switch (signal) {
+                        // Data received.
+                        case 1:
+                            if (Object.hasOwn(data, 'progress')) {
+                                this.updateLoaderProgress(data.progress * 0.5);
+                            }
+                            if (Object.hasOwn(data, 'message')) {
+                                $('.loader h6').html(translate(data.message, data.messageReplace));
+                            }
+                            break;
+
+                        // Task complete.
+                        case 2:
+                            // TODO: draw map
+                            // this.hideLoader();
+                            break;
+                    }
+                });
+            },
+            {
+                once: true,
+                passive: true,
+            }
+        );
     }
 
     drawNewBaseLayout(options)
@@ -122,26 +137,26 @@ export default class SCIM
         }
 
         setTimeout(function(){
-            options.build               = this.build;
-            options.debug               = this.debug;
+            options.build               = config.getBuild();
+            options.debug               = config.isDebugMode();
             options.version             = this.scriptsVERSION;
 
-            options.staticUrl           = this.staticAssetsUrl;
-            options.dataUrl             = this.gameDataUrl;
-            options.modsUrl             = this.modsDataUrl;
-            options.tetrominoUrl        = this.tetrominoUrl;
-            options.usersUrl            = this.usersUrl;
+            options.staticUrl           = config.getStaticAssetsUri();
+            options.dataUrl             = config.getGameDataUrl();
+            options.modsUrl             = config.getModsDataUrl();
+            options.tetrominoUrl        = config.getTetrominoUrl();
+            options.usersUrl            = config.getUsersUrl();
 
-            options.language            = this.language;
+            options.language            = config.getLanguage();
 
             options.satisfactoryMap     = this.map;
             options.saveGameParser      = new SaveParser({
                 arrayBuffer                 : options.droppedFileResult,
                 fileName                    : options.droppedFileName,
-                language                    : this.language,
+                language                    : config.getLanguage(),
 
-                saveParserReadWorker        : this.saveParserReadWorker,
-                saveParserWriteWorker       : this.saveParserWriteWorker
+                saveParserReadWorker        : config.getSaveParserReadWorkerUrl(),
+                saveParserWriteWorker       : config.getSaveParserWriteWorkerUrl()
             });
 
             this.baseLayout = new BaseLayout(options);
@@ -183,6 +198,10 @@ export default class SCIM
         }
 
         $('#dropSaveGame').show();
+    }
+
+    updateLoaderProgress(progress) {
+        $('#loaderProgressBar .progress-bar').css('width', (100 * progress) + '%');
     }
 
 

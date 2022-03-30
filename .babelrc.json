@@ -6,5 +6,8 @@
         "spec": true
       }
     ]
+  ],
+  "plugins": [
+    "babel-plugin-transform-object-hasown"
   ]
 }
